@@ -1,0 +1,8 @@
+numpy
+osqp
+jax
+jaxlib
+scipy
+matplotlib
+seaborn
+ipyopt
