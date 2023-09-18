@@ -630,14 +630,14 @@ if B_validate_monte_carlo:
     print("[drone_main_plot.py] >>> Monte Carlo")
     M = 10000
     model = Model(M)
-    def no_collisions_constraint_verification(
+    def monte_carlo_no_collisions_constraint_verification(
         us_mat, mass, dWs, obs_Q):
         xs = model.us_to_state_trajectory(us_mat, mass, dWs)
         ineqs = model.obstacle_avoidance_constraints_euclidean(xs, obs_Q)
         max_constraint = jnp.max(ineqs)
         B_satisfied = max_constraint <= OSQP_TOL + 1e-6
         return xs, B_satisfied, max_constraint
-    def var(Z_samples, alpha):
+    def monte_carlo_var(Z_samples, alpha):
         # search for minimum t such that
         # Prob(Z > t) <= \alpha, which is
         # E[ indicator_fn_{(t,\infty]}(Z) ] <= \alpha, 
@@ -645,29 +645,12 @@ if B_validate_monte_carlo:
         # 1/M sum_i Indicator_fn_{(t, \infty]}(Z_i) <= alpha.
         # which is what we compute here.
         M = len(Z_samples)
-        # bisection search
-        # t_min, t_max = -2, 1
-        # e_tol = 1e-7
-        # iteration = 0
-        # while np.abs(t_max-t_min) > e_tol:
-        #     # print("i = ", iteration)
-        #     iteration += 1
-        #     t = (t_max + t_min) / 2
-        #     # print("t= ", t)
-        #     prob_estimate = (np.sum(Z_samples > t) / M)
-        #     if prob_estimate == alpha:
-        #         return t
-        #     elif prob_estimate < alpha:
-        #         t_max = t
-        #     else:
-        #         t_min = t
-        # return t_max
         # by just sorting the elements
         Z_samples_sorted = np.sort(Z_samples)
         xth = int(np.floor(alpha*M))
         xth_largest = Z_samples_sorted[M-xth-1]
         return xth_largest
-    def avar(Z_samples, alpha):
+    def monte_carlo_avar(Z_samples, alpha):
         # estimates avar_alpha(Z)
         M = len(Z_samples)
         num_variables = M + 1 # (ys, t)
@@ -708,12 +691,12 @@ if B_validate_monte_carlo:
 
     us_vmapped = jnp.repeat(
         us[jnp.newaxis, :, :], M, axis=0) 
-    xs_MC, B_satisfied_vec, constraints_vec = vmap(no_collisions_constraint_verification)(
+    xs_MC, B_satisfied_vec, constraints_vec = vmap(monte_carlo_no_collisions_constraint_verification)(
         us_vmapped,
         model.masses, model.DWs, model.obs_Qs)
     percentage_safe = 1-jnp.mean(B_satisfied_vec)
-    avar_val = avar(constraints_vec, alpha)
-    var_val = var(constraints_vec, alpha)
+    avar_val = monte_carlo_avar(constraints_vec, alpha)
+    var_val = monte_carlo_var(constraints_vec, alpha)
     with open('results/drone_main_monte_carlo.npy', 
         'wb') as f:
         np.save(f, us)

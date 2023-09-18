@@ -1,3 +1,4 @@
+from pathlib import Path
 import scipy.sparse as sp
 import numpy as np
 import osqp
@@ -17,10 +18,38 @@ config.update("jax_enable_x64", True)
 config.update('jax_platform_name', 'cpu')
 from warnings import warn
 
-B_compute_solution_saa = True
-B_compute_solution_base = True
-B_plot_results_saa = True
-B_plot_results_base = True
+from drone_utils import sample_uncertain_parameters
+
+import drone_params
+
+# Load drone model parameters
+OSQP_POLISH = drone_params.OSQP_POLISH
+OSQP_TOL = drone_params.OSQP_TOL
+n_x = drone_params.n_x
+n_u = drone_params.n_u
+S = drone_params.S
+M = drone_params.M
+T = drone_params.T
+dt = drone_params.dt
+R = drone_params.R
+feedback_gain = drone_params.feedback_gain
+u_max = drone_params.u_max
+mass_nom = drone_params.mass_nom
+mass_delta = drone_params.mass_delta
+beta = drone_params.beta
+drag_coefficient = drone_params.drag_coefficient
+obs_positions = drone_params.obs_positions
+obs_radii = drone_params.obs_radii
+obs_radii_deltas = drone_params.obs_radii_deltas
+n_obs = drone_params.n_obs
+x_init = drone_params.x_init
+x_final = drone_params.x_final
+
+# script parameters
+B_compute_solution_saa = False
+B_compute_solution_base = False
+B_plot_results_saa = False
+B_plot_results_base = False
 B_validate_monte_carlo = True
 alphas = [0.05, 0.1, 0.2, 0.3]
 num_repeats_saa = 30
@@ -37,48 +66,6 @@ print("alphas =", alphas)
 print("num_repeats_saa =", num_repeats_saa)
 print("---------------------------------------")
 
-# optimizer parameters
-OSQP_POLISH = True
-OSQP_TOL = 1e-3
-# state-control dimensions
-n_x = 6 # (px, py, pz, vx, vy, vz) - number of state variables
-n_u = 3 # (ux, uy, uz) - number of control variables\
-# time problem constants
-S = 20 # number of control switches
-M = 50 # number of samples
-T = 50.0 # max final time horizon in sec
-dt = T / S
-R = jnp.eye(n_u) # cost term
-feedback_gain = jnp.zeros((n_u, n_x))
-feedback_gain = feedback_gain.at[:, :3].set(
-    0.05 * jnp.eye(n_u))
-feedback_gain = feedback_gain.at[:, 3:].set(
-    0.25 * jnp.eye(n_u))
-feedback_gain = -feedback_gain
-# constants
-u_max = 10
-mass_nom = 32.0
-mass_delta = 3
-# obstacle - mean parameters
-# obstacles are represented as ellipsoids:
-# p \in obstacle
-#      <=>
-# (p-obs_position).T @ Q @ (p-obs_position) <= 1
-# where Q = [1 / length_x**2, 0]
-#           [0, 1 / length_y**2]
-obs_positions = jnp.array([
-    [-1.4, -0.1, 0],
-    [-0.7, 0.3, 0],
-    [-0.3, 0.25, 0]])
-obs_radii = jnp.array([
-    0.3,
-    0.2,
-    0.2])
-obs_radii_deltas = 0.025
-n_obs = obs_positions.shape[0] # number of obstacles
-# initial and final conditions
-x_init = jnp.array([-1.9, 0.05, 0.2, 0, 0, 0])
-x_final = jnp.zeros(n_x)
 
 class Model:
     def __init__(
@@ -94,8 +81,8 @@ class Model:
         self.u_min = -self.u_max
         # uncertain parameters
         self.alpha = alpha # risk parameter
-        self.beta = 1e-2 # diffusion term magnitude
-        self.drag_coefficient = 0.2 
+        self.beta = beta # diffusion term magnitude
+        self.drag_coefficient = drag_coefficient 
 
         self.DWs = DWs
         self.masses = masses
@@ -423,7 +410,7 @@ class Model:
 
     def define_problem(self, us_mat_p, verbose=False):
         scp_iter = 2 # make sure that the osqp problem is defined 
-                     # with collision avoidacne constraints
+                     # with collision avoidance constraints
         # objective and constraints
         self.P, self.q = self.get_objective_coeffs()
         self.A, self.l, self.u = self.get_constraints_coeffs(
@@ -473,45 +460,12 @@ def L2_error_us(us_mat, us_mat_prev):
     return error
 
 # -----------------------------------------
-def sample_uncertain_parameters(method='saa', M=M):
-    if method == 'saa':
-        # mass of the system
-        masses = np.random.uniform(
-            mass_nom - mass_delta,
-            mass_nom + mass_delta, M)
-        # semi axes of the obstacles
-        obs_Qs = np.zeros((M, n_obs, 3, 3))
-        for obs_i in range(n_obs):
-            for dim in range(3):
-                obs_delta_r = np.random.uniform(
-                    -obs_radii_deltas,
-                    obs_radii_deltas, M)
-                for i in range(M):
-                    length = obs_radii[obs_i] + obs_delta_r[i]
-                    obs_Qs[i, obs_i, dim, dim] = 1. / length**2
-    if method == 'baseline':
-        masses = np.random.uniform(
-            mass_nom - 0 * mass_delta,
-            mass_nom + 0 * mass_delta, M)
-        obs_Qs = np.zeros((M, n_obs, 3, 3))
-        for obs_i in range(n_obs):
-            for dim in range(3):
-                length = obs_radii[obs_i]
-                obs_Qs[:, obs_i, dim, dim] = 1. / length**2
-    # Brownian motion increments
-    DWs = np.zeros((M, S, n_x))
-    for i in range(M):
-        for t in range(S):
-            DWs[i, t, :] = np.sqrt(dt) * np.random.randn(n_x)
-    if method == 'baseline':
-        DWs = 0 * DWs
-    return DWs, masses, obs_Qs
-
+# sample uncertain parameters
 DWs_all = np.zeros((num_repeats_saa, M, S, n_x))
 masses_all = np.zeros((num_repeats_saa, M))
 obs_Qs_all = np.zeros((num_repeats_saa, M, n_obs, 3, 3))
 for idx_repeat in range(num_repeats_saa):
-    DWs, masses, obs_Qs = sample_uncertain_parameters('saa')
+    DWs, masses, obs_Qs = sample_uncertain_parameters('saa', M=M)
     DWs_all[idx_repeat] = DWs
     masses_all[idx_repeat] = masses
     obs_Qs_all[idx_repeat] = obs_Qs
@@ -573,7 +527,7 @@ if B_compute_solution_base:
     print("---------------------------------------")
     print("[drone_risk.py] >>> Computing baseline solution")
     # run baseline without uncertainty
-    DWs, masses, obs_Qs = sample_uncertain_parameters('baseline')
+    DWs, masses, obs_Qs = sample_uncertain_parameters('baseline', M=M)
     model = Model(DWs, masses, obs_Qs, 'baseline')
     # initial compilation
     us_prev = model.initial_guess_us_mat()
@@ -621,7 +575,7 @@ if B_plot_results_base or B_plot_results_saa:
                 'rb') as f:
                 us = np.load(f)
                 xs = np.load(f)
-            DWs, masses, obs_Qs = sample_uncertain_parameters('baseline')
+            DWs, masses, obs_Qs = sample_uncertain_parameters('baseline', M=M)
             model = Model(DWs, masses, obs_Qs, 'baseline')
         if counter == 1 and B_plot_results_saa:
             alpha = 0.05
@@ -631,7 +585,7 @@ if B_plot_results_base or B_plot_results_saa:
                 'rb') as f:
                 us = np.load(f)
                 xs = np.load(f)
-            DWs, masses, obs_Qs = sample_uncertain_parameters('saa')
+            DWs, masses, obs_Qs = sample_uncertain_parameters('saa', M=M)
             model = Model(DWs, masses, obs_Qs, 'saa')
         # plot
         fig = plt.figure(figsize=[6,3])
@@ -673,24 +627,24 @@ if B_plot_results_base or B_plot_results_saa:
 if B_validate_monte_carlo:
     print("---------------------------------------")
     print("[drone_risk.py] >>> Monte Carlo")
-    M = 10000
+    M = 100000
     DWs, masses, obs_Qs = sample_uncertain_parameters('saa', M=M)
     model = Model(DWs, masses, obs_Qs, 'saa')
-    def cost(us_mat):
+    def monte_carlo_cost(us_mat):
         value = 0.
         for t in range(S):
             for i in range(n_u):
                 value = value + R[i, i] * us_mat[t, i] * us_mat[t, i]
         value = dt * value
         return value
-    def no_collisions_constraint_verification(
+    def monte_carlo_no_collisions_constraint_verification(
         us_mat, mass, dWs, obs_Q):
         xs = model.us_to_state_trajectory(us_mat, mass, dWs)
         ineqs = model.obstacle_avoidance_constraints(xs, obs_Q)
         max_constraint = jnp.max(ineqs) - OSQP_TOL
         B_satisfied = max_constraint <= 1e-6
         return B_satisfied, max_constraint
-    def avar(Z_samples, alpha):
+    def monte_carlo_avar(Z_samples, alpha):
         # estimates avar_alpha(Z)
         M = len(Z_samples)
         num_variables = M + 1 # (ys, t)
@@ -738,10 +692,10 @@ if B_validate_monte_carlo:
                 _ = np.load(f)
             us_vmapped = jnp.repeat(
                 us[jnp.newaxis, :, :], M, axis=0) 
-            B_satisfied_vec, constraints_vec = vmap(no_collisions_constraint_verification)(
+            B_satisfied_vec, constraints_vec = vmap(monte_carlo_no_collisions_constraint_verification)(
                 us_vmapped,
                 model.masses, model.DWs, model.obs_Qs)
-            avar_val = avar(constraints_vec, alpha)
+            avar_val = monte_carlo_avar(constraints_vec, alpha)
             # pack results
             us_mat_all = us_mat_all.at[idx_repeat, :, :].set(us)
             B_satisfied_mat = B_satisfied_mat.at[idx_repeat, :].set(B_satisfied_vec)
@@ -749,23 +703,44 @@ if B_validate_monte_carlo:
             print("B_satisfied_vec =", jnp.mean(B_satisfied_vec))
         print("percentage safe (mean) =", jnp.mean(B_satisfied_mat))
         print("avar (mean) =", jnp.mean(avar_val_vec))
-        print("cost (mean) =", jnp.mean(vmap(cost)(us_mat_all)))
+        print("cost (mean) =", jnp.mean(vmap(monte_carlo_cost)(us_mat_all)))
         print("percentage safe (median) =", jnp.median(jnp.mean(B_satisfied_mat, axis=-1)))
         print("avar (median) =", jnp.median(avar_val_vec))
-        print("cost (median) =", jnp.median(vmap(cost)(us_mat_all)))
+        print("cost (median) =", jnp.median(vmap(monte_carlo_cost)(us_mat_all)))
 
     print("---------------------------")
-    print("Monte-Carlo: baseline")
+    print("Monte-Carlo: deterministic baseline")
     with open('results/drone_baseline.npy', 
         'rb') as f:
         us = np.load(f)
         _ = np.load(f)
     us_vmapped = jnp.repeat(
         us[jnp.newaxis, :, :], M, axis=0) 
-    B_satisfied_vec, constraints_vec = vmap(no_collisions_constraint_verification)(
+    B_satisfied_vec, constraints_vec = vmap(monte_carlo_no_collisions_constraint_verification)(
         us_vmapped,
         model.masses, model.DWs, model.obs_Qs)
-    avar_val = avar(constraints_vec, alpha)
     print("percentage safe =", jnp.mean(B_satisfied_vec))
-    print("cost =", cost(us))
+    print("cost =", monte_carlo_cost(us))
+    print("---------------------------------------")
+
+    print("---------------------------")
+    print("Monte-Carlo: Gaussian baseline")
+    for alpha in alphas:
+        print("---------------------------")
+        print("Monte-Carlo: alpha =", alpha)
+        my_file = "results/drone_gaussian_alpha="+str(alpha)+".npy"
+        if not(Path(my_file).is_file()):
+            msg = my_file + " does not exist.\n"
+            msg += "run drone_gaussian.py first."
+            raise FileNotFoundError(msg)
+        with open(my_file, 'rb') as f:
+            us = np.load(f)
+            _ = np.load(f)
+        us_vmapped = jnp.repeat(
+            us[jnp.newaxis, :, :], M, axis=0) 
+        B_satisfied_vec, constraints_vec = vmap(monte_carlo_no_collisions_constraint_verification)(
+            us_vmapped,
+            model.masses, model.DWs, model.obs_Qs)
+        print("percentage safe =", jnp.mean(B_satisfied_vec))
+        print("cost =", monte_carlo_cost(us))
     print("---------------------------------------")
