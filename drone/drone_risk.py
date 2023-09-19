@@ -46,14 +46,14 @@ x_init = drone_params.x_init
 x_final = drone_params.x_final
 
 # script parameters
-B_compute_solution_saa = False
-B_compute_solution_base = False
-B_plot_results_saa = False
-B_plot_results_base = False
+B_compute_solution_saa = True
+B_compute_solution_base = True
+B_plot_results_saa = True
+B_plot_results_base = True
 B_validate_monte_carlo = True
 alphas = [0.05, 0.1, 0.2, 0.3]
 num_repeats_saa = 30
-num_scp_iters_max = 20
+num_scp_iters_max = 60
 np.random.seed(0) # results may differ, the algorithm is randomized.
 print("---------------------------------------")
 print("[drone_risk.py] >>> Running with parameters:")
@@ -69,13 +69,17 @@ print("---------------------------------------")
 
 class Model:
     def __init__(
-        self, 
+        self,
+        S,
         DWs, masses, obs_Qs,
         method='saa', alpha=0.1):
         print("Initializing Model with")
         print("> method =", method)
         print("> alpha  =", alpha)
+        print("> S      =", S)
         self.method = method
+        self.S = S
+        self.dt = T / S
         # control bounds
         self.u_max = u_max
         self.u_min = -self.u_max
@@ -89,6 +93,7 @@ class Model:
         self.obs_Qs = obs_Qs
 
     def convert_us_vec_to_us_mat(self, us_vec):
+        S = self.S
         us_mat = jnp.reshape(us_vec, (n_u, S), 'F')
         us_mat = us_mat.T # (S, n_u)
         us_mat = jnp.array(us_mat)
@@ -96,10 +101,12 @@ class Model:
 
     @partial(jit, static_argnums=(0,))
     def convert_us_mat_to_us_jaxvec(self, us_mat):
+        S = self.S
         us_vec = jnp.reshape(us_mat, (S*n_u), 'C')
         return us_vec
 
     def initial_guess_us_mat(self):
+        S = self.S
         us = jnp.zeros((S, n_u))
         u_initial_guess = (self.u_max + self.u_min) / 2.0
         # Add a small number to the initial guess.
@@ -134,7 +141,7 @@ class Model:
         # us_mat - (S, n_u)
         # mass   - scalar
         # dWs    - (S, n_x)
-        # The dWs should already be indexed well, see @next_state
+        S, dt = self.S, self.dt
         xs = jnp.zeros((S+1, n_x))
         xs = xs.at[0, :].set(x_init)
         for t in range(S):
@@ -149,7 +156,6 @@ class Model:
 
     def us_to_state_trajectories(self, us_mat):
         # us_mat - (S, n_u)
-        # The dWs should already be indexed well, see @next_state
         Us = jnp.repeat(us_mat[jnp.newaxis, :, :], M, axis=0)
         Xs = vmap(self.us_to_state_trajectory)(
             Us, self.masses, self.DWs)
@@ -180,6 +186,7 @@ class Model:
         # for all x in xs.
         # xs must be of size (S, n_x)
         # returns a vector of size S.
+        S = self.S
         obs_positions = jnp.repeat(
             obs_position[jnp.newaxis, :], S, axis=0) 
         obs_Q_matrices = jnp.repeat(
@@ -215,6 +222,7 @@ class Model:
     def get_control_constraints_coeffs_all(self):
         # Returns (A, l, u) corresponding to control constraints
         # such that l <= A uvec <= u.
+        S = self.S
         A = jnp.zeros((n_u*S, n_u*S + M + 2)) # (M + 2) are risk parameters
         l = jnp.zeros(n_u*S)
         u = jnp.zeros(n_u*S)
@@ -249,6 +257,8 @@ class Model:
                 mass, dWs, obs_Q)
             return jac
 
+        S = self.S
+
         v_final, g_obs = all_constraints_us(us_mat, mass, dWs, obs_Q)
         v_final_du, g_obs_du = all_constraints_dus(us_mat, mass, dWs, obs_Q)
 
@@ -271,6 +281,8 @@ class Model:
 
     @partial(jit, static_argnums=(0,))
     def get_all_constraints_coeffs_all(self, us_mat):
+        S = self.S
+
         Us = jnp.repeat(us_mat[jnp.newaxis, :, :], M, axis=0)
 
         final_du, final_low, final_up, g_obs_du, g_obs_up = vmap(
@@ -364,6 +376,8 @@ class Model:
     @partial(jit, static_argnums=(0,))
     def get_objective_coeffs_jax(self):
         # See description of @get_objective_coeffs
+        S, dt = self.S, self.dt
+
         P = jnp.zeros((n_u*S + M + 2, n_u*S + M + 2)) # (M + 2) variables for risk constraint
         q = jnp.zeros(n_u*S + M + 2)
         # control squared
@@ -438,6 +452,8 @@ class Model:
         return True
 
     def solve(self, verbose=True):
+        S = self.S
+
         self.res = self.osqp_prob.solve()
         if self.res.info.status != 'solved':
             print("[solve]: Problem infeasible.")
@@ -484,7 +500,7 @@ if B_compute_solution_saa:
             DWs = DWs_all[idx_repeat]
             masses = masses_all[idx_repeat]
             obs_Qs = obs_Qs_all[idx_repeat]
-            model = Model(DWs, masses, obs_Qs, 'saa', alpha)
+            model = Model(S, DWs, masses, obs_Qs, 'saa', alpha)
 
             # Initial compilation (JAX)
             us_prev = model.initial_guess_us_mat()
@@ -528,7 +544,7 @@ if B_compute_solution_base:
     print("[drone_risk.py] >>> Computing baseline solution")
     # run baseline without uncertainty
     DWs, masses, obs_Qs = sample_uncertain_parameters('baseline', M=M)
-    model = Model(DWs, masses, obs_Qs, 'baseline')
+    model = Model(S, DWs, masses, obs_Qs, 'baseline')
     # initial compilation
     us_prev = model.initial_guess_us_mat()
     model.define_problem(us_prev, verbose=False)
@@ -576,7 +592,7 @@ if B_plot_results_base or B_plot_results_saa:
                 us = np.load(f)
                 xs = np.load(f)
             DWs, masses, obs_Qs = sample_uncertain_parameters('baseline', M=M)
-            model = Model(DWs, masses, obs_Qs, 'baseline')
+            model = Model(S, DWs, masses, obs_Qs, 'baseline')
         if counter == 1 and B_plot_results_saa:
             alpha = 0.05
             idx_repeat = 1
@@ -586,7 +602,7 @@ if B_plot_results_base or B_plot_results_saa:
                 us = np.load(f)
                 xs = np.load(f)
             DWs, masses, obs_Qs = sample_uncertain_parameters('saa', M=M)
-            model = Model(DWs, masses, obs_Qs, 'saa')
+            model = Model(S, DWs, masses, obs_Qs, 'saa')
         # plot
         fig = plt.figure(figsize=[6,3])
         for i in range(M):
@@ -627,9 +643,9 @@ if B_plot_results_base or B_plot_results_saa:
 if B_validate_monte_carlo:
     print("---------------------------------------")
     print("[drone_risk.py] >>> Monte Carlo")
-    M = 100000
+    M = 10000
     DWs, masses, obs_Qs = sample_uncertain_parameters('saa', M=M)
-    model = Model(DWs, masses, obs_Qs, 'saa')
+    model = Model(S, DWs, masses, obs_Qs, 'saa')
     def monte_carlo_cost(us_mat):
         value = 0.
         for t in range(S):

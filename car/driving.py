@@ -50,11 +50,11 @@ state_init = driving_params.state_init
 std_matrix_ped_initial_state = jnp.sqrt(
     driving_params.variance_ped_initial_state)
 
-B_compute_solution_saa = False
-B_compute_solution_base = False
-B_plot_results_saa = False
+B_compute_solution_saa = True
+B_compute_solution_base = True
+B_plot_results_saa = True
 B_validate_monte_carlo = True
-B_plot_computation_times = False
+B_plot_computation_times = True
 alphas = [0.01, 0.02, 0.05, 0.1]
 num_repeats_saa = 30
 num_scp_iters_max = 15
@@ -726,16 +726,17 @@ if B_validate_monte_carlo:
             msg = my_file + " does not exist.\n"
             msg += "run driving_gaussian.py first."
             raise FileNotFoundError(msg)
-        with open(my_file, 'rb') as f:
-            us = np.load(f)
-            _ = np.load(f)
-        us_vmapped = jnp.repeat(
-            us[jnp.newaxis, :, :], M, axis=0) 
-        B_satisfied_vec, val_constraint_vec = vmap(monte_carlo_separation_constraints_verification)(
-            us_vmapped,
-            model.states_init, model.omegas_speed, model.omegas_repulsive, model.DWs)
-        print("percentage safe =", jnp.mean(B_satisfied_vec))
-        print("cost =", monte_carlo_cost(us))
+        else:
+            with open(my_file, 'rb') as f:
+                us = np.load(f)
+                _ = np.load(f)
+            us_vmapped = jnp.repeat(
+                us[jnp.newaxis, :, :], M, axis=0) 
+            B_satisfied_vec, val_constraint_vec = vmap(monte_carlo_separation_constraints_verification)(
+                us_vmapped,
+                model.states_init, model.omegas_speed, model.omegas_repulsive, model.DWs)
+            print("percentage safe =", jnp.mean(B_satisfied_vec))
+            print("cost =", monte_carlo_cost(us))
     print("---------------------------------------")
 
 

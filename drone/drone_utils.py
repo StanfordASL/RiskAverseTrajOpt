@@ -58,7 +58,7 @@ n_obs = drone_params.n_obs
 x_init = drone_params.x_init
 x_final = drone_params.x_final
 
-def sample_uncertain_parameters(method='saa', M=100):
+def sample_uncertain_parameters(method='saa', M=100, S=S, dt=dt):
     if method == 'saa':
         # mass of the system
         masses = np.random.uniform(

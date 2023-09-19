@@ -5,6 +5,10 @@ To reproduce the drone planning results, run
 ``
 
 ``
+  python drone_gaussian.py
+``
+
+``
   python drone_times.py
 ``
 
