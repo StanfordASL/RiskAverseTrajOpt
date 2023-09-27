@@ -1,3 +1,4 @@
+from pathlib import Path
 import scipy.sparse as sp
 import numpy as np
 import osqp
@@ -15,6 +16,39 @@ from functools import partial
 from jax.config import config
 config.update("jax_enable_x64", True)
 config.update('jax_platform_name', 'cpu')
+
+import driving_params
+
+# load driving parameters
+OSQP_POLISH = driving_params.OSQP_POLISH
+OSQP_TOL = driving_params.OSQP_TOL
+n_x = driving_params.n_x
+n_u = driving_params.n_u
+S = driving_params.S
+M = driving_params.M
+T = driving_params.T
+dt = driving_params.dt
+R = driving_params.R
+u_max = driving_params.u_max
+omega_speed_nom = driving_params.omega_speed_nom
+omega_speed_del = driving_params.omega_speed_del
+omega_repulsive_nom = driving_params.omega_repulsive_nom
+omega_repulsive_del = driving_params.omega_repulsive_del
+ego_width = driving_params.ego_width
+ego_height = driving_params.ego_height
+ped_radius = driving_params.ped_radius
+min_separation_distance = driving_params.min_separation_distance
+speed_ped_des = driving_params.speed_ped_des
+speed_ego_init = driving_params.speed_ego_init
+position_ego_init = driving_params.position_ego_init
+position_ped_init = driving_params.position_ped_init
+velocity_ego_init = driving_params.velocity_ego_init
+velocity_ped_init = driving_params.velocity_ped_init
+position_ego_goal = driving_params.position_ego_goal
+velocity_ego_goal = driving_params.velocity_ego_goal
+state_init = driving_params.state_init
+std_matrix_ped_initial_state = jnp.sqrt(
+    driving_params.variance_ped_initial_state)
 
 B_compute_solution_saa = True
 B_compute_solution_base = True
@@ -46,48 +80,6 @@ computation_times_cum = np.zeros((
 accuracy_error = np.zeros((
     num_repeats_saa, len(alphas), num_scp_iters_max))
 
-# optimizer parameters
-OSQP_POLISH = True
-OSQP_TOL = 3e-4
-# state-control dimensions
-n_x = 8 # number of state variables
-        # (px_e, py_e, v_e, phi_e, 
-        #  px_ped, py_ped, vx_ped, vy_ped)
-n_u = 2 # (a, omega) - number of control variables
-# time problem constants
-S = 20 # number of control switches
-M = 50 # number of samples
-T = 10.0 # max final time horizon in sec
-dt = T / S # discretization time
-R = jnp.diag(jnp.array([1.0, 1. / 3.0])) # control penalization
-# constants
-u_max = 100
-omega_speed_nom = 0.1
-omega_speed_del = 0.075 
-omega_repulsive_nom = 0.05
-omega_repulsive_del = 0.045
-# minimal separation distance
-ego_width = 2.695 # length of Smart car
-ego_height = 1.663 # width of Smart car
-ped_radius = 0.5
-min_separation_distance = (ped_radius + 
-    np.sqrt(ego_width**2 + ego_height**2))
-# initial conditions
-speed_ped_des = 1.3 # desired speed of pedestrian
-speed_ego_init = 4 # initial car speed
-position_ego_init = jnp.array([-20., 0.])
-position_ped_init = jnp.array([0., -6.])
-velocity_ego_init = jnp.array([speed_ego_init, 0.])
-velocity_ped_init = jnp.array([0., speed_ped_des])
-position_ego_goal = jnp.array([20., 0.1])
-velocity_ego_goal = jnp.array([4.1, 0.])
-state_init = jnp.concatenate((position_ego_init,
-    velocity_ego_init,
-    position_ped_init, 
-    velocity_ped_init), axis=-1)
-variance_ped_initial_state = jnp.diag(
-    jnp.array([1e-1, 1e-1, 1e-4, 1e-4]))
-
 class Model:
     def __init__(self, M, method='saa', alpha=0.05):
         print("Initializing Model with")
@@ -112,7 +104,7 @@ class Model:
         states_init = jnp.repeat(state_init[jnp.newaxis, :], M, axis=0)
         if method=='saa':
             for i in range(M):
-                samples = variance_ped_initial_state @ np.random.randn(4)
+                samples = std_matrix_ped_initial_state @ np.random.randn(4)
                 states_init = states_init.at[i, 4:].set(
                     states_init[i, 4:] + samples)
         self.states_init = states_init
@@ -124,8 +116,8 @@ class Model:
         self.DWs = jnp.array(np.sqrt(dt) * self.DWs)
         if method=='baseline':
             self.DWs = 0 * self.DWs 
-            self.thetas = 0 * self.omegas_speed 
-            self.taus = 0 * self.omegas_repulsive 
+            self.omegas_speed = 0 * self.omegas_speed 
+            self.omegas_repulsive = 0 * self.omegas_repulsive 
 
     def convert_us_vec_to_us_mat(self, us_vec):
         us_mat = jnp.reshape(us_vec, (n_u, S), 'F')
@@ -628,14 +620,14 @@ if B_validate_monte_carlo:
     print("[driving.py] >>> Monte Carlo")
     M = 10000
     model = Model(M)
-    def cost(us_mat):
+    def monte_carlo_cost(us_mat):
         value = 0.
         for t in range(S):
             value = value + R[0, 0] * us_mat[t, 0] * us_mat[t, 0]
             value = value + R[1, 1] * us_mat[t, 1] * us_mat[t, 1]
         value = dt * value
         return value
-    def separation_constraints_verification(us_mat, 
+    def monte_carlo_separation_constraints_verification(us_mat, 
         state_init, omega_speed, omega_repulsive, dWs):
         xs = model.us_to_state_trajectory(us_mat,
             state_init, omega_speed, omega_repulsive, dWs)
@@ -644,7 +636,7 @@ if B_validate_monte_carlo:
         # val_constraint should be <= 0
         B_satisfied = val_constraint <= 1e-6
         return B_satisfied, val_constraint
-    def avar(Z_samples, alpha):
+    def monte_carlo_avar(Z_samples, alpha):
         # estimates avar_alpha(Z)
         M = len(Z_samples)
         num_variables = M + 1 # (ys, t)
@@ -693,10 +685,10 @@ if B_validate_monte_carlo:
 
             us_vmapped = jnp.repeat(
                 us[jnp.newaxis, :, :], M, axis=0) 
-            B_satisfied_vec, val_constraint_vec = vmap(separation_constraints_verification)(
+            B_satisfied_vec, val_constraint_vec = vmap(monte_carlo_separation_constraints_verification)(
                 us_vmapped,
                 model.states_init, model.omegas_speed, model.omegas_repulsive, model.DWs)
-            avar_val = avar(val_constraint_vec, alpha)
+            avar_val = monte_carlo_avar(val_constraint_vec, alpha)
             # pack results
             us_mat_all = us_mat_all.at[idx_repeat, :, :].set(us)
             B_satisfied_mat = B_satisfied_mat.at[idx_repeat, :].set(B_satisfied_vec)
@@ -705,26 +697,47 @@ if B_validate_monte_carlo:
             # print("avar =", avar_val)
         print("percentage safe (mean) =", jnp.mean(B_satisfied_mat))
         print("avar (mean) =", jnp.mean(avar_val_vec))
-        print("cost (mean) =", jnp.mean(vmap(cost)(us_mat_all)))
+        print("cost (mean) =", jnp.mean(vmap(monte_carlo_cost)(us_mat_all)))
         print("percentage safe (median) =", jnp.median(jnp.mean(B_satisfied_mat, axis=1)))
         print("avar (median) =", jnp.median(avar_val_vec))
-        print("cost (median) =", jnp.median(vmap(cost)(us_mat_all)))
+        print("cost (median) =", jnp.median(vmap(monte_carlo_cost)(us_mat_all)))
 
     print("---------------------------")
-    print("Monte-Carlo: baseline")
+    print("Monte-Carlo: deterministic baseline")
     with open('results/driving_baseline.npy', 
         'rb') as f:
         us = np.load(f)
     us_vmapped = jnp.repeat(
         us[jnp.newaxis, :, :], M, axis=0) 
-    B_satisfied_vec, val_constraint_vec = vmap(separation_constraints_verification)(
+    B_satisfied_vec, val_constraint_vec = vmap(monte_carlo_separation_constraints_verification)(
         us_vmapped,
         model.states_init, model.omegas_speed, model.omegas_repulsive, model.DWs)
     print("percentage safe =", jnp.mean(B_satisfied_vec))
-    print("cost =", cost(us))
+    print("cost =", monte_carlo_cost(us))
     print("---------------------------------------")
 
-
+    print("---------------------------")
+    print("Monte-Carlo: Gaussian baseline")
+    for alpha in alphas:
+        print("---------------------------")
+        print("Monte-Carlo: alpha =", alpha)
+        my_file = "results/driving_gaussian_alpha="+str(alpha)+".npy"
+        if not(Path(my_file).is_file()):
+            msg = my_file + " does not exist.\n"
+            msg += "run driving_gaussian.py first."
+            raise FileNotFoundError(msg)
+        else:
+            with open(my_file, 'rb') as f:
+                us = np.load(f)
+                _ = np.load(f)
+            us_vmapped = jnp.repeat(
+                us[jnp.newaxis, :, :], M, axis=0) 
+            B_satisfied_vec, val_constraint_vec = vmap(monte_carlo_separation_constraints_verification)(
+                us_vmapped,
+                model.states_init, model.omegas_speed, model.omegas_repulsive, model.DWs)
+            print("percentage safe =", jnp.mean(B_satisfied_vec))
+            print("cost =", monte_carlo_cost(us))
+    print("---------------------------------------")
 
 
 if B_plot_computation_times:
